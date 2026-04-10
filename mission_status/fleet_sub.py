@@ -1,3 +1,8 @@
+import re
+import subprocess
+import threading
+import time
+
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
@@ -9,12 +14,91 @@ from async_pac_gnn_interfaces.msg import RobotStatus, MissionControl
 from mission_status.drone_record import DroneStateStore, MissionStore
 
 
+BATTERY_POLL_INTERVAL = 180  # seconds
+ROBOT_IP_PREFIX = "192.168.0.1"  # r<N> -> 192.168.0.1<NN>
+ROBOT_SSH_PASS = "oelinux123"
+
+
+def _robot_ssh_host(namespace: str) -> str:
+    """Convert robot namespace (e.g. 'r5') to its SSH IP (e.g. '192.168.0.105')."""
+    m = re.match(r'^r(\d+)$', namespace)
+    if m:
+        return f"{ROBOT_IP_PREFIX}{int(m.group(1)):02d}"
+    return namespace
+
+
+def _poll_battery(namespace: str, store: DroneStateStore) -> None:
+    host = _robot_ssh_host(namespace)
+    try:
+        result = subprocess.run(
+            [
+                "sshpass", "-p", ROBOT_SSH_PASS,
+                "ssh", "-o", "StrictHostKeyChecking=no",
+                f"root@{host}", "px4-listener battery_status -n 1",
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+        output = result.stdout + result.stderr
+    except Exception as e:
+        store.update(namespace, batt_status=f"Error: {e}")
+        return
+
+    if not output.strip():
+        store.update(namespace, batt_status=f"Error: empty output (rc={result.returncode})")
+        return
+
+    volt = curr = remaining = None
+    for line in output.splitlines():
+        parts = line.split()           # awk-style: split on whitespace, $1=key $2=value
+        if len(parts) < 2:
+            continue
+        key, val = parts[0], parts[1]
+        if key == "voltage_v:":
+            try:
+                volt = float(val)
+            except ValueError:
+                pass
+        elif key == "current_a:":
+            try:
+                curr = float(val)
+            except ValueError:
+                pass
+        elif key == "remaining:":
+            try:
+                remaining = float(val)
+            except ValueError:
+                pass
+
+    if remaining is not None:
+        pct = round(remaining * 100)
+        if remaining >= 0.80:
+            status = "OK"
+        elif remaining >= 0.40:
+            status = "Low"
+        elif remaining >= 0.15:
+            status = "Critical"
+        else:
+            status = "EMPTY"
+    else:
+        pct = None
+        status = "Unknown"
+
+    store.update(namespace, batt_volt=volt, batt_pct=pct, batt_curr=curr, batt_status=status)
+
+
+def _battery_poll_loop(namespace: str, store: DroneStateStore) -> None:
+    while True:
+        _poll_battery(namespace, store)
+        time.sleep(BATTERY_POLL_INTERVAL)
+
+
 class FleetSubscriber(Node):
     def __init__(self, store: DroneStateStore, mission_store: MissionStore, namespaces: list[str]):
         super().__init__("gcs_fleet_subscriber")
         self._store = store
         self._mission_store = mission_store
         self._subscribed: set[str] = set()
+        self._battery_polled: set[str] = set()
 
         self.qos_profile = QoSProfile(
             history=QoSHistoryPolicy.KEEP_LAST,
@@ -54,9 +138,8 @@ class FleetSubscriber(Node):
 
     def _discover(self):
         for topic, _ in self.get_topic_names_and_types():
-            # match /<ns>/pose — ignore anything nested deeper
             parts = topic.strip("/").split("/")
-            if len(parts) == 2 and parts[1] == "pose" and parts[0] not in self._subscribed:
+            if len(parts) == 2 and parts[1] == "robot_status" and parts[0] not in self._subscribed:
                 self._make_subs(parts[0])
 
     def _make_subs(self, ns: str):
@@ -64,6 +147,7 @@ class FleetSubscriber(Node):
             self._store.update(
                 ns,
                 state=msg.state,
+                diagnostic=msg.diagnostic,
                 breach=msg.breach,
                 gps_lat=msg.gps_lat,
                 gps_lon=msg.gps_lon,
@@ -91,3 +175,10 @@ class FleetSubscriber(Node):
         self._subscribed.add(ns)
         self.create_subscription(RobotStatus, f"/{ns}/robot_status", on_robot_status, self.qos_profile)
         self.create_subscription(PoseStamped, f"/{ns}/pose", on_position, self.qos_profile)
+
+        if ns not in self._battery_polled:
+            self._battery_polled.add(ns)
+            t = threading.Thread(
+                target=_battery_poll_loop, args=(ns, self._store), daemon=True
+            )
+            t.start()

@@ -42,6 +42,7 @@ class DroneRecord:
     position: tuple | None = None
     # RobotStatus fields (updated on state change only)
     state: str | None = None
+    diagnostic: str | None = None
     breach: bool | None = None
     gps_lat: float | None = None
     gps_lon: float | None = None
@@ -55,6 +56,10 @@ class DroneRecord:
     ned_vel_x: float | None = None
     ned_vel_y: float | None = None
     ned_vel_z: float | None = None
+    batt_volt: float | None = None
+    batt_pct: int | None = None
+    batt_curr: float | None = None
+    batt_status: str | None = None
     last_seen: float = field(default_factory=time.monotonic)
     stale: bool = False
 

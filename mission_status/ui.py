@@ -42,21 +42,28 @@ def build_fleet_table(records: list[DroneRecord]) -> Table:
     t = Table(title="Fleet Status")
     t.add_column("Drone", style="cyan")
     t.add_column("State")
+    t.add_column("Diagnostic")
     t.add_column("Breach")
+    t.add_column("Position (mission)")
     t.add_column("Position (local)")
     t.add_column("Heading")
     t.add_column("Alt")
     t.add_column("GPS (lat,lon)")
     t.add_column("GPS Sats")
-    t.add_column("NED Vel (x,y,z)")
+    t.add_column("NED Vel")
+    t.add_column("Battery")
     t.add_column("Last Seen")
     t.add_column("Link")
 
     for r in sorted(records, key=lambda x: x.namespace):
         age = time.monotonic() - r.last_seen
         link = "[red]STALE[/]" if r.stale else "[green]OK[/]"
-        breach = "[red]YES[/]" if r.breach else ("—" if r.breach is None else "no")
+        breach = "[red]YES[/]" if r.breach else ("--" if r.breach is None else "no")
 
+        mission_pos = (
+            "(" + ",".join(f"{v:.2f}" for v in r.position) + ")"
+            if r.position is not None else "—"
+        )
         local_pos = (
             f"{r.local_pos_x:.2f},{r.local_pos_y:.2f}"
             if r.local_pos_x is not None else "—"
@@ -73,16 +80,30 @@ def build_fleet_table(records: list[DroneRecord]) -> Table:
             if r.ned_vel_x is not None else "—"
         )
 
+        if r.batt_pct is not None:
+            _batt_colors = {
+                "OK": "green", "Low": "yellow", "Critical": "red", "EMPTY": "bold red",
+            }
+            color = _batt_colors.get(r.batt_status or "", "dim")
+            batt = f"[{color}]{r.batt_pct}%[/]"
+        elif r.batt_status is not None:
+            batt = f"[dim]{r.batt_status}[/]"
+        else:
+            batt = "[dim]—[/]"
+
         t.add_row(
             r.namespace,
-            r.state or "—",
+            r.state or "--",
+            r.diagnostic or "--",
             breach,
+            mission_pos,
             local_pos,
             heading,
             alt,
             gps,
             gps_sats,
             ned_vel,
+            batt,
             f"{age:.1f}s ago",
             link,
         )
