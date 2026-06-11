@@ -1,7 +1,9 @@
+import os
 import re
 import subprocess
 import threading
 import time
+import yaml
 
 import rclpy
 from rclpy.node import Node
@@ -10,11 +12,39 @@ from geometry_msgs.msg import PoseStamped, Point
 from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy, QoSDurabilityPolicy
 
 from async_pac_gnn_interfaces.msg import RobotStatus, MissionControl
+from async_pac_gnn_interfaces.srv import SystemInfo, WorldMap
 
 from mission_status.drone_record import DroneStateStore, MissionStore
 
 
 BATTERY_POLL_INTERVAL = 180  # seconds
+
+_FENCE_KEYS = {'fence_x_buf_l', 'fence_x_buf_r', 'fence_y_buf_b', 'fence_y_buf_t'}
+
+
+def _load_fence_params() -> dict:
+    """Read fence buffer values from launch/starling/lpac_l2.yaml."""
+    pac_ws = os.environ.get('PAC_WS', os.path.expanduser('~/pac_ws'))
+    yaml_path = os.path.join(pac_ws, 'launch', 'starling', 'lpac_l2.yaml')
+    result: dict = {}
+    try:
+        with open(yaml_path) as f:
+            data = yaml.safe_load(f)
+
+        def _search(obj):
+            if isinstance(obj, dict):
+                if obj.get('name') in _FENCE_KEYS:
+                    result[obj['name']] = float(obj['value'])
+                for v in obj.values():
+                    _search(v)
+            elif isinstance(obj, list):
+                for item in obj:
+                    _search(item)
+
+        _search(data)
+    except Exception:
+        pass
+    return result
 ROBOT_IP_PREFIX = "192.168.0.1"  # r<N> -> 192.168.0.1<NN>
 ROBOT_SSH_PASS = "oelinux123"
 
@@ -113,6 +143,18 @@ class FleetSubscriber(Node):
         self.create_timer(2.0, self._discover)
         self._make_mission_subs()
 
+        self._world_info_done = False
+        self._world_info_waiting = False
+        self._density_done = False
+        self._density_waiting = False
+        self._sys_info_client = self.create_client(SystemInfo, '/sim/get_system_info')
+        self._world_map_client = self.create_client(WorldMap, '/sim/get_world_map')
+        self.create_timer(3.0, self._fetch_world_info)
+
+        fence_params = _load_fence_params()
+        if fence_params:
+            self._mission_store.update(**fence_params)
+
     def _make_mission_subs(self):
         def on_mission_origin(msg: Point):
             self._mission_store.update(
@@ -142,6 +184,50 @@ class FleetSubscriber(Node):
             if len(parts) == 2 and parts[1] == "robot_status" and parts[0] not in self._subscribed:
                 self._make_subs(parts[0])
 
+    def _fetch_world_info(self):
+        if not self._world_info_done and not self._world_info_waiting:
+            if self._sys_info_client.service_is_ready():
+                req = SystemInfo.Request()
+                req.name = ''
+                future = self._sys_info_client.call_async(req)
+                future.add_done_callback(self._on_system_info)
+                self._world_info_waiting = True
+
+        if self._world_info_done and not self._density_done and not self._density_waiting:
+            if self._world_map_client.service_is_ready():
+                req = WorldMap.Request()
+                req.map_size = 32
+                future = self._world_map_client.call_async(req)
+                future.add_done_callback(self._on_world_map)
+                self._density_waiting = True
+
+    def _on_system_info(self, future):
+        self._world_info_waiting = False
+        try:
+            result = future.result()
+            if result is None:
+                return
+            self._mission_store.update(
+                world_size=result.world_size,
+                env_scale_factor=result.env_scale_factor,
+            )
+            self._world_info_done = True
+        except Exception:
+            pass
+
+    def _on_world_map(self, future):
+        self._density_waiting = False
+        try:
+            result = future.result()
+            if result is None or not result.success:
+                return
+            data = list(result.map.data)
+            n = int(len(data) ** 0.5 + 0.5)
+            self._mission_store.update(density_map=data, density_map_size=n)
+            self._density_done = True
+        except Exception:
+            pass
+
     def _make_subs(self, ns: str):
         def on_robot_status(msg: RobotStatus):
             self._store.update(
@@ -161,6 +247,13 @@ class FleetSubscriber(Node):
                 ned_vel_x=msg.ned_vel_x,
                 ned_vel_y=msg.ned_vel_y,
                 ned_vel_z=msg.ned_vel_z,
+                preflight_pass=msg.pre_flight_checks_pass,
+                arming_state=msg.arming_state,
+                disarming_reason=msg.disarming_reason,
+                nav_state=msg.nav_state,
+                gcs_conn_lost=msg.gcs_conn_lost,
+                failure_detector_status=msg.failure_detector_status,
+                safety_off=msg.safety_off,
             )
 
         def on_position(msg: PoseStamped):

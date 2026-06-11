@@ -18,6 +18,18 @@ class MissionRecord:
     pac_offboard_only: bool | None = None
     pac_lpac_l1: bool | None = None
     pac_lpac_l2: bool | None = None
+    # world geometry (from /sim/get_system_info)
+    world_size: float | None = None        # model units (e.g. 512)
+    env_scale_factor: float | None = None  # divisor: phys_m = world_size / env_scale_factor
+    # density map (from /sim/get_world_map, flat row-major float32 array)
+    density_map: list | None = None
+    density_map_size: int | None = None    # side length N; total = N*N
+    # geofence buffer distances in physical metres (from lpac_l2.yaml)
+    # fence spans [-buf_l, phys_extent+buf_r] x [-buf_b, phys_extent+buf_t]
+    fence_x_buf_l: float = 5.0
+    fence_x_buf_r: float = 5.0
+    fence_y_buf_b: float = 5.0
+    fence_y_buf_t: float = 5.0
 
 
 class MissionStore:
@@ -56,6 +68,13 @@ class DroneRecord:
     ned_vel_x: float | None = None
     ned_vel_y: float | None = None
     ned_vel_z: float | None = None
+    preflight_pass: bool | None = None
+    arming_state: int | None = None
+    disarming_reason: int | None = None
+    nav_state: int | None = None
+    gcs_conn_lost: bool | None = None
+    failure_detector_status: int | None = None
+    safety_off: bool | None = None
     batt_volt: float | None = None
     batt_pct: int | None = None
     batt_curr: float | None = None

@@ -1,3 +1,4 @@
+import argparse
 import threading
 import rclpy
 from rclpy.executors import MultiThreadedExecutor
@@ -30,11 +31,12 @@ def launch(namespaces: list[str]) -> tuple[DroneStateStore, MissionStore]:
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
-    # 1. Start ROS thread — returns immediately, spins in background
-    store, mission_store = launch([])
+    parser = argparse.ArgumentParser(description='PAC mission status dashboard')
+    parser.add_argument('--no-map', action='store_true', help='Disable the mission map panel')
+    args, _ = parser.parse_known_args()  # ignore ROS args
 
-    # 2. Hand control to the rich UI — this blocks the main thread (intentional)
-    ui_main(store, mission_store)
+    store, mission_store = launch([])
+    ui_main(store, mission_store, show_map=not args.no_map)
 
 
 if __name__ == "__main__":
